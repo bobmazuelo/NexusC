@@ -1,8 +1,12 @@
 #ifndef NEXUSC_H
 #define NEXUSC_H
 
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <unistd.h>
+
+#include "reader_csv.h"
 
 #define errf(fmt, args...)                                                     \
   do {                                                                         \
@@ -15,7 +19,5 @@
 #define ERROR_RETURN(R, ...)                                                   \
   fprintf(stderr, __VA_ARGS__);                                                \
   return R
-
-int square(int);
 
 #endif
