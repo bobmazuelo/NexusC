@@ -1,3 +1,4 @@
+#pagma once
 #ifndef NEXUSC_H
 #define NEXUSC_H
 
