@@ -1,8 +1,6 @@
 #ifndef NEXUSC_H
 #define NEXUSC_H
 
-#define _GNU_SOURCE
-
 #include <stdio.h>
 #include <unistd.h>
 
