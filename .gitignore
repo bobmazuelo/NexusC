@@ -1,0 +1,4 @@
+.vscode
+build
+.DS_Store
+./data/XAU_1m_data.csv

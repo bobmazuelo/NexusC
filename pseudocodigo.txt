@@ -1,0 +1,443 @@
+ALGORITMO CRT_Trading_Strategy
+
+// ============================================
+// DEFINICIONES Y CONSTANTES
+// ============================================
+
+CONSTANTES:
+    TEMPORALIDADES_ANALISIS = [MENSUAL, SEMANAL, DIARIA, 4_HORAS]
+    TEMPORALIDADES_EJECUCION = {
+        MENSUAL  -> 4_HORAS,
+        SEMANAL  -> 1_HORA,
+        DIARIA   -> 15_MINUTOS,
+        4_HORAS  -> 5_MINUTOS
+    }
+    TEMPORALIDADES_INTERMEDIAS = {
+        MENSUAL  -> [4_HORAS],
+        SEMANAL  -> [4_HORAS, 1_HORA],
+        DIARIA   -> [4_HORAS, 1_HORA, 15_MINUTOS],
+        4_HORAS  -> [1_HORA, 15_MINUTOS, 5_MINUTOS]
+    }
+
+// ============================================
+// ESTRUCTURAS DE DATOS
+// ============================================
+
+ESTRUCTURA Vela:
+    apertura    : DECIMAL
+    cierre      : DECIMAL
+    maximo      : DECIMAL
+    minimo      : DECIMAL
+    temporalidad: TEXTO
+FIN ESTRUCTURA
+
+ESTRUCTURA Rango:
+    limite_superior : DECIMAL
+    limite_inferior : DECIMAL
+    punto_medio     : DECIMAL
+    vela_origen     : Vela
+    estado          : ENUM {NO_DEFINIDO, DEFINIDO, ACTIVADO_ALCISTA, 
+                            ACTIVADO_BAJISTA, CONFIRMADO_ALCISTA, 
+                            CONFIRMADO_BAJISTA, INVALIDADO}
+FIN ESTRUCTURA
+
+ESTRUCTURA Trade:
+    tipo            : ENUM {LARGO, CORTO}
+    precio_entrada  : DECIMAL
+    stop_loss       : DECIMAL
+    take_profit     : DECIMAL
+    riesgo_beneficio: DECIMAL
+FIN ESTRUCTURA
+
+ESTRUCTURA Fase:
+    nombre : ENUM {RANGO, MANIPULACION, DISTRIBUCION}
+    numero : ENTERO  // 1, 2 o 3
+FIN ESTRUCTURA
+
+// ============================================
+// FUNCIONES AUXILIARES
+// ============================================
+
+FUNCION calcular_rango(vela: Vela) -> Rango:
+    rango = NUEVO Rango
+    rango.limite_superior = vela.maximo
+    rango.limite_inferior = vela.minimo
+    rango.punto_medio = (vela.maximo + vela.minimo) / 2
+    rango.vela_origen = vela
+    rango.estado = DEFINIDO
+    RETORNAR rango
+FIN FUNCION
+
+FUNCION verificar_activacion(rango: Rango, vela_siguiente: Vela) -> Rango:
+    // Se activa cuando el precio barre uno de los extremos del rango
+    
+    SI vela_siguiente.minimo < rango.limite_inferior ENTONCES
+        // Se barrió la parte inferior: activación alcista
+        rango.estado = ACTIVADO_ALCISTA
+        
+    SI NO, SI vela_siguiente.maximo > rango.limite_superior ENTONCES
+        // Se barrió la parte superior: activación bajista
+        rango.estado = ACTIVADO_BAJISTA
+        
+    SI NO
+        rango.estado = DEFINIDO  // No se activó ningún nivel
+    FIN SI
+    
+    RETORNAR rango
+FIN FUNCION
+
+FUNCION verificar_confirmacion(rango: Rango, vela_siguiente: Vela) -> Rango:
+    // Se confirma cuando la vela cierra DENTRO del rango después de barrer un extremo
+    
+    SI rango.estado == ACTIVADO_ALCISTA ENTONCES
+        SI vela_siguiente.cierre >= rango.limite_inferior 
+           Y vela_siguiente.cierre <= rango.limite_superior ENTONCES
+            rango.estado = CONFIRMADO_ALCISTA
+        FIN SI
+        
+    SI NO, SI rango.estado == ACTIVADO_BAJISTA ENTONCES
+        SI vela_siguiente.cierre >= rango.limite_inferior 
+           Y vela_siguiente.cierre <= rango.limite_superior ENTONCES
+            rango.estado = CONFIRMADO_BAJISTA
+        FIN SI
+    FIN SI
+    
+    RETORNAR rango
+FIN FUNCION
+
+FUNCION determinar_sesgo(rango: Rango, vela_siguiente: Vela) -> TEXTO:
+    // Reglas de sesgo según CRT
+    
+    SI vela_siguiente.cierre > rango.limite_superior ENTONCES
+        RETORNAR "ALCISTA_CONTINUACION"
+        // Cierre por encima = sesgo más alto en la siguiente
+        
+    SI NO, SI vela_siguiente.cierre < rango.limite_inferior ENTONCES
+        RETORNAR "BAJISTA_CONTINUACION"
+        // Cierre por debajo = sesgo más bajo en la siguiente
+        
+    SI NO, SI vela_siguiente.maximo > rango.limite_superior 
+             Y vela_siguiente.cierre <= rango.limite_superior ENTONCES
+        RETORNAR "BAJISTA_REVERSION"
+        // Mecha por encima sin cierre = sesgo más bajo en la siguiente
+        
+    SI NO, SI vela_siguiente.minimo < rango.limite_inferior 
+             Y vela_siguiente.cierre >= rango.limite_inferior ENTONCES
+        RETORNAR "ALCISTA_REVERSION"
+        // Mecha por debajo sin cierre = sesgo más alto en la siguiente
+        
+    SI NO
+        RETORNAR "NEUTRAL"
+    FIN SI
+FIN FUNCION
+
+FUNCION identificar_fase(vela_numero: ENTERO) -> Fase:
+    SEGUN vela_numero:
+        CASO 1: RETORNAR Fase(RANGO, 1)
+        CASO 2: RETORNAR Fase(MANIPULACION, 2)
+        CASO 3: RETORNAR Fase(DISTRIBUCION, 3)
+    FIN SEGUN
+FIN FUNCION
+
+FUNCION hay_espacio_hasta_rango_opuesto(rango: Rango, precio_actual: DECIMAL, 
+                                         direccion: TEXTO) -> BOOLEANO:
+    SI direccion == "LARGO" ENTONCES
+        RETORNAR (rango.limite_superior - precio_actual) > 0
+    SI NO
+        RETORNAR (precio_actual - rango.limite_inferior) > 0
+    FIN SI
+FIN FUNCION
+
+FUNCION obtener_vela_actual(temporalidad: TEXTO) -> Vela:
+    // Obtiene la vela actual/en curso de la temporalidad indicada
+    RETORNAR datos_mercado.vela_actual(temporalidad)
+FIN FUNCION
+
+FUNCION obtener_vela_anterior(temporalidad: TEXTO) -> Vela:
+    // Obtiene la vela cerrada inmediatamente anterior
+    RETORNAR datos_mercado.vela_anterior(temporalidad)
+FIN FUNCION
+
+FUNCION obtener_velas_anteriores(temporalidad: TEXTO, cantidad: ENTERO) -> LISTA[Vela]:
+    RETORNAR datos_mercado.ultimas_velas(temporalidad, cantidad)
+FIN FUNCION
+
+// ============================================
+// ALGORITMO PRINCIPAL - ESTRATEGIA CRT 5 PASOS
+// ============================================
+
+PROCEDIMIENTO ejecutar_estrategia_CRT():
+    
+    // Seleccionar temporalidad de análisis principal
+    PARA CADA temp_principal EN TEMPORALIDADES_ANALISIS HACER:
+        
+        temp_ejecucion = TEMPORALIDADES_EJECUCION[temp_principal]
+        temps_intermedias = TEMPORALIDADES_INTERMEDIAS[temp_principal]
+        
+        // =============================================
+        // PASO 1: DETERMINAR EL RANGO EN TEMPORALIDAD PRINCIPAL
+        // =============================================
+        
+        vela_rango_principal = obtener_vela_anterior(temp_principal)
+        rango_principal = calcular_rango(vela_rango_principal)
+        
+        MOSTRAR "PASO 1: Rango principal definido en " + temp_principal
+        MOSTRAR "  Superior: " + rango_principal.limite_superior
+        MOSTRAR "  Inferior: " + rango_principal.limite_inferior
+        MOSTRAR "  Punto medio: " + rango_principal.punto_medio
+        
+        // =============================================
+        // PASO 2: VERIFICAR ACTIVACIÓN/CONFIRMACIÓN DEL RANGO PRINCIPAL
+        // =============================================
+        
+        vela_actual_principal = obtener_vela_actual(temp_principal)
+        velas_posteriores = obtener_velas_anteriores(temp_principal, 3)
+        
+        rango_activado = FALSO
+        direccion_trade = ""
+        vela_que_activa = NULO
+        
+        // Buscar activación en la segunda vela o velas posteriores
+        PARA CADA vela_posterior EN velas_posteriores HACER:
+            
+            rango_principal = verificar_activacion(rango_principal, vela_posterior)
+            rango_principal = verificar_confirmacion(rango_principal, vela_posterior)
+            
+            SI rango_principal.estado == ACTIVADO_ALCISTA 
+               O rango_principal.estado == CONFIRMADO_ALCISTA ENTONCES
+                rango_activado = VERDADERO
+                direccion_trade = "LARGO"
+                vela_que_activa = vela_posterior
+                SALIR DEL BUCLE
+                
+            SI NO, SI rango_principal.estado == ACTIVADO_BAJISTA 
+                      O rango_principal.estado == CONFIRMADO_BAJISTA ENTONCES
+                rango_activado = VERDADERO
+                direccion_trade = "CORTO"
+                vela_que_activa = vela_posterior
+                SALIR DEL BUCLE
+            FIN SI
+        FIN PARA
+        
+        SI NO rango_activado ENTONCES
+            MOSTRAR "PASO 2: Rango NO activado en " + temp_principal + ". Continuar buscando."
+            CONTINUAR  // Pasar a la siguiente temporalidad principal
+        FIN SI
+        
+        MOSTRAR "PASO 2: Rango ACTIVADO - Dirección: " + direccion_trade
+        
+        // =============================================
+        // PASOS 3 Y 4: VERIFICAR ALINEACIÓN EN TEMPORALIDADES INTERMEDIAS
+        // =============================================
+        
+        todas_alineadas = VERDADERO
+        rangos_intermedios = NUEVA LISTA
+        
+        PARA CADA temp_intermedia EN temps_intermedias HACER:
+            
+            // Buscar la vela que forma el rango en esta temporalidad
+            vela_rango_intermedio = obtener_vela_anterior(temp_intermedia)
+            rango_intermedio = calcular_rango(vela_rango_intermedio)
+            
+            // Verificar si se activa en la misma dirección
+            vela_actual_intermedia = obtener_vela_actual(temp_intermedia)
+            rango_intermedio = verificar_activacion(rango_intermedio, vela_actual_intermedia)
+            rango_intermedio = verificar_confirmacion(rango_intermedio, vela_actual_intermedia)
+            
+            // Verificar alineación con la dirección del trade
+            SI direccion_trade == "LARGO" ENTONCES
+                SI rango_intermedio.estado != ACTIVADO_ALCISTA 
+                   Y rango_intermedio.estado != CONFIRMADO_ALCISTA ENTONCES
+                    
+                    // Si no se activó, puede que el rango esté invalidado
+                    // Buscar nuevo rango válido (adaptación)
+                    rango_intermedio = buscar_rango_valido(temp_intermedia, "ALCISTA")
+                    
+                    SI rango_intermedio.estado == INVALIDADO 
+                       O rango_intermedio.estado == NO_DEFINIDO ENTONCES
+                        todas_alineadas = FALSO
+                        MOSTRAR "PASO 3/4: Temporalidad " + temp_intermedia + " NO alineada"
+                        SALIR DEL BUCLE
+                    FIN SI
+                FIN SI
+                
+            SI NO  // CORTO
+                SI rango_intermedio.estado != ACTIVADO_BAJISTA 
+                   Y rango_intermedio.estado != CONFIRMADO_BAJISTA ENTONCES
+                    
+                    rango_intermedio = buscar_rango_valido(temp_intermedia, "BAJISTA")
+                    
+                    SI rango_intermedio.estado == INVALIDADO 
+                       O rango_intermedio.estado == NO_DEFINIDO ENTONCES
+                        todas_alineadas = FALSO
+                        MOSTRAR "PASO 3/4: Temporalidad " + temp_intermedia + " NO alineada"
+                        SALIR DEL BUCLE
+                    FIN SI
+                FIN SI
+            FIN SI
+            
+            AGREGAR rango_intermedio A rangos_intermedios
+            MOSTRAR "PASO 3/4: " + temp_intermedia + " ALINEADA - Estado: " + rango_intermedio.estado
+        FIN PARA
+        
+        SI NO todas_alineadas ENTONCES
+            MOSTRAR "No todas las temporalidades están alineadas. Esperando..."
+            CONTINUAR
+        FIN SI
+        
+        // =============================================
+        // PASO 5: CONFIRMAR EN TEMPORALIDAD DE EJECUCIÓN Y EJECUTAR
+        // =============================================
+        
+        MOSTRAR "PASO 5: Buscando confirmación en " + temp_ejecucion
+        
+        vela_rango_ejecucion = obtener_vela_anterior(temp_ejecucion)
+        rango_ejecucion = calcular_rango(vela_rango_ejecucion)
+        
+        vela_actual_ejecucion = obtener_vela_actual(temp_ejecucion)
+        rango_ejecucion = verificar_activacion(rango_ejecucion, vela_actual_ejecucion)
+        rango_ejecucion = verificar_confirmacion(rango_ejecucion, vela_actual_ejecucion)
+        
+        // Verificar confirmación final
+        ejecutar = FALSO
+        
+        SI direccion_trade == "LARGO" ENTONCES
+            SI rango_ejecucion.estado == CONFIRMADO_ALCISTA ENTONCES
+                SI hay_espacio_hasta_rango_opuesto(rango_ejecucion, 
+                   vela_actual_ejecucion.cierre, "LARGO") ENTONCES
+                    ejecutar = VERDADERO
+                FIN SI
+            FIN SI
+            
+        SI NO  // CORTO
+            SI rango_ejecucion.estado == CONFIRMADO_BAJISTA ENTONCES
+                SI hay_espacio_hasta_rango_opuesto(rango_ejecucion, 
+                   vela_actual_ejecucion.cierre, "CORTO") ENTONCES
+                    ejecutar = VERDADERO
+                FIN SI
+            FIN SI
+        FIN SI
+        
+        SI ejecutar ENTONCES
+            trade = crear_trade(direccion_trade, vela_actual_ejecucion, 
+                               rango_ejecucion, rango_principal, rangos_intermedios)
+            ejecutar_trade(trade)
+        SI NO
+            MOSTRAR "Confirmación en temporalidad de ejecución NO lograda. Esperando..."
+        FIN SI
+        
+    FIN PARA
+
+FIN PROCEDIMIENTO
+
+// ============================================
+// FUNCIÓN DE ADAPTACIÓN DE RANGO
+// ============================================
+
+FUNCION buscar_rango_valido(temporalidad: TEXTO, direccion: TEXTO) -> Rango:
+    // Cuando el rango original está invalidado, buscar el siguiente rango válido
+    
+    velas_recientes = obtener_velas_anteriores(temporalidad, 10)
+    
+    PARA i = 0 HASTA LONGITUD(velas_recientes) - 2 HACER:
+        rango_candidato = calcular_rango(velas_recientes[i])
+        vela_siguiente = velas_recientes[i + 1]
+        
+        rango_candidato = verificar_activacion(rango_candidato, vela_siguiente)
+        rango_candidato = verificar_confirmacion(rango_candidato, vela_siguiente)
+        
+        SI direccion == "ALCISTA" ENTONCES
+            SI rango_candidato.estado == ACTIVADO_ALCISTA 
+               O rango_candidato.estado == CONFIRMADO_ALCISTA ENTONCES
+                RETORNAR rango_candidato
+            FIN SI
+        SI NO
+            SI rango_candidato.estado == ACTIVADO_BAJISTA 
+               O rango_candidato.estado == CONFIRMADO_BAJISTA ENTONCES
+                RETORNAR rango_candidato
+            FIN SI
+        FIN SI
+    FIN PARA
+    
+    RETORNAR Rango(estado = INVALIDADO)
+FIN FUNCION
+
+// ============================================
+// FUNCIÓN DE CREACIÓN Y EJECUCIÓN DEL TRADE
+// ============================================
+
+FUNCION crear_trade(direccion: TEXTO, vela_entrada: Vela, rango_ejecucion: Rango, 
+                     rango_principal: Rango, rangos_intermedios: LISTA[Rango]) -> Trade:
+    
+    trade = NUEVO Trade
+    trade.tipo = direccion
+    
+    SI direccion == "LARGO" ENTONCES
+        // Entrada: apertura de la siguiente vela tras confirmación
+        trade.precio_entrada = vela_entrada.cierre  // Aproximación al siguiente open
+        
+        // Stop Loss: por debajo de los mínimos anteriores
+        trade.stop_loss = rango_ejecucion.limite_inferior - margen_seguridad()
+        
+        // Take Profit: opciones de menor a mayor ambición
+        // Opción 1 (conservador): máximo del rango de temporalidad intermedia más cercana
+        // Opción 2 (moderado): punto medio del rango principal (50%)
+        // Opción 3 (agresivo): máximo del rango principal
+        
+        SI LONGITUD(rangos_intermedios) > 0 ENTONCES
+            trade.take_profit = rangos_intermedios[0].limite_superior  // Rango de 4H por ej.
+        SI NO
+            trade.take_profit = rango_principal.punto_medio
+        FIN SI
+        
+    SI NO  // CORTO
+        trade.precio_entrada = vela_entrada.cierre
+        
+        // Stop Loss: por encima de los máximos anteriores
+        trade.stop_loss = rango_ejecucion.limite_superior + margen_seguridad()
+        
+        // Take Profit
+        SI LONGITUD(rangos_intermedios) > 0 ENTONCES
+            trade.take_profit = rangos_intermedios[0].limite_inferior
+        SI NO
+            trade.take_profit = rango_principal.punto_medio
+        FIN SI
+    FIN SI
+    
+    // Calcular ratio riesgo/beneficio
+    riesgo = ABS(trade.precio_entrada - trade.stop_loss)
+    beneficio = ABS(trade.take_profit - trade.precio_entrada)
+    trade.riesgo_beneficio = beneficio / riesgo
+    
+    RETORNAR trade
+FIN FUNCION
+
+PROCEDIMIENTO ejecutar_trade(trade: Trade):
+    SI trade.riesgo_beneficio >= 1.5 ENTONCES  // Mínimo aceptable
+        MOSTRAR "============================================"
+        MOSTRAR "EJECUTANDO TRADE:"
+        MOSTRAR "  Tipo:              " + trade.tipo
+        MOSTRAR "  Entrada:           " + trade.precio_entrada
+        MOSTRAR "  Stop Loss:         " + trade.stop_loss
+        MOSTRAR "  Take Profit:       " + trade.take_profit
+        MOSTRAR "  Ratio R/B:         " + trade.riesgo_beneficio
+        MOSTRAR "============================================"
+        
+        enviar_orden_a_mercado(trade)
+    SI NO
+        MOSTRAR "Trade descartado: ratio R/B insuficiente (" + trade.riesgo_beneficio + ")"
+    FIN SI
+FIN PROCEDIMIENTO
+
+// ============================================
+// BUCLE PRINCIPAL DE MONITOREO
+// ============================================
+
+PROCEDIMIENTO main():
+    MIENTRAS mercado_esta_abierto() HACER:
+        ejecutar_estrategia_CRT()
+        esperar(intervalo_de_actualizacion)
+    FIN MIENTRAS
+FIN PROCEDIMIENTO
+
+FIN ALGORITMO
